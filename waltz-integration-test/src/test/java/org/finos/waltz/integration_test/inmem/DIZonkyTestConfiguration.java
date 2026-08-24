@@ -21,7 +21,7 @@ import org.springframework.context.annotation.*;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jmx.support.RegistrationPolicy;
 
-import javax.annotation.PostConstruct;
+import jakarta.annotation.PostConstruct;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.sql.Connection;
