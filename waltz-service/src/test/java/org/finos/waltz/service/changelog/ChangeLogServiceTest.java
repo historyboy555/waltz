@@ -46,6 +46,8 @@ import org.mockito.MockitoAnnotations;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Collection;
+import java.util.stream.Collectors;
 
 import static org.finos.waltz.model.EntityKind.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -129,7 +131,7 @@ class ChangeLogServiceTest {
 
         service.writeChangeLogEntries(flowRef, "actor", "changed", Operation.UPDATE);
 
-        Set<ChangeLog> entries = capturedEntries();
+        Collection<ChangeLog> entries = capturedEntries();
         assertEquals(Set.of(flowRef, source, target), parents(entries));
         assertAll(entries.stream().map(entry -> () -> {
             assertEquals("Logical flow from: Source [1], to: Target [2]: changed", entry.message());
@@ -161,12 +163,14 @@ class ChangeLogServiceTest {
 
         service.writeChangeLogEntries(physicalRef, "actor", "changed", Operation.UPDATE);
 
-        Set<ChangeLog> entries = capturedEntries();
+        Collection<ChangeLog> entries = capturedEntries();
         assertEquals(Set.of(physicalRef, logicalRef, source, target), parents(entries));
-        assertEquals("Physical flow: Specification, from: Source [1], to: Target [2]: changed",
-                entries.iterator().next().message());
-        assertEquals(Optional.of(PHYSICAL_FLOW), entries.iterator().next().childKind());
-        assertEquals(Optional.of(30L), entries.iterator().next().childId());
+        assertAll(entries.stream().map(entry -> () -> {
+            assertEquals("Physical flow: Specification, from: Source [1], to: Target [2]: changed",
+                    entry.message());
+            assertEquals(Optional.of(PHYSICAL_FLOW), entry.childKind());
+            assertEquals(Optional.of(30L), entry.childId());
+        }));
     }
 
     @Test
@@ -184,11 +188,13 @@ class ChangeLogServiceTest {
 
         service.writeChangeLogEntries(specRef, "actor", "changed", Operation.UPDATE);
 
-        Set<ChangeLog> entries = capturedEntries();
+        Collection<ChangeLog> entries = capturedEntries();
         assertEquals(Set.of(specRef, flowRef), parents(entries));
-        assertEquals("Physical spec: Specification: changed", entries.iterator().next().message());
-        assertEquals(Optional.of(PHYSICAL_SPECIFICATION), entries.iterator().next().childKind());
-        assertEquals(Optional.of(20L), entries.iterator().next().childId());
+        assertAll(entries.stream().map(entry -> () -> {
+            assertEquals("Physical spec: Specification: changed", entry.message());
+            assertEquals(Optional.of(PHYSICAL_SPECIFICATION), entry.childKind());
+            assertEquals(Optional.of(20L), entry.childId());
+        }));
     }
 
     @Test
@@ -213,14 +219,15 @@ class ChangeLogServiceTest {
                 .thenReturn(Optional.of(ref(MEASURABLE_RATING_REPLACEMENT, 200, "Replacement")));
 
         service.writeChangeLogEntries(replacementRef, "actor", "changed", Operation.UPDATE);
-        Set<ChangeLog> replacementEntries = capturedEntries();
+        Collection<ChangeLog> replacementEntries = capturedEntries();
         assertEquals(Set.of(replacementRef, originalRef), parents(replacementEntries));
-        ChangeLog replacementEntry = replacementEntries.iterator().next();
-        assertEquals("Replacement measurable_rating_replacement: Replacement [200], for measurable: Measurable [55] on: Measurable [55]: changed",
-                replacementEntry.message());
-        assertEquals(Optional.of(MEASURABLE_RATING_REPLACEMENT), replacementEntry.childKind());
-        // These overloads currently populate only childKind; pin the absent child id as-is.
-        assertEquals(Optional.empty(), replacementEntry.childId());
+        assertAll(replacementEntries.stream().map(entry -> () -> {
+            assertEquals("Replacement measurable_rating_replacement: Replacement [200], for measurable: Measurable [55] on: Measurable [55]: changed",
+                    entry.message());
+            assertEquals(Optional.of(MEASURABLE_RATING_REPLACEMENT), entry.childKind());
+            // These overloads currently populate only childKind; pin the absent child id as-is.
+            assertEquals(Optional.empty(), entry.childId());
+        }));
 
         clearInvocations(changeLogDao);
         when(replacementDao.fetchByDecommissionId(300L)).thenReturn(Set.of(replacement));
@@ -229,13 +236,15 @@ class ChangeLogServiceTest {
                 "actor",
                 "changed",
                 Operation.UPDATE);
-        Set<ChangeLog> plannedEntries = capturedEntries();
+        Collection<ChangeLog> plannedEntries = capturedEntries();
         assertEquals(Set.of(replacementRef, originalRef), parents(plannedEntries));
-        ChangeLog plannedEntry = plannedEntries.iterator().next();
-        assertEquals("Measurable Rating: Measurable [55] on: Measurable [55]: changed", plannedEntry.message());
-        assertEquals(Optional.of(MEASURABLE_RATING_PLANNED_DECOMMISSION), plannedEntry.childKind());
-        // These overloads currently populate only childKind; pin the absent child id as-is.
-        assertEquals(Optional.empty(), plannedEntry.childId());
+        assertAll(plannedEntries.stream().map(entry -> () -> {
+            assertEquals("Measurable Rating: Measurable [55] on: Measurable [55]: changed",
+                    entry.message());
+            assertEquals(Optional.of(MEASURABLE_RATING_PLANNED_DECOMMISSION), entry.childKind());
+            // These overloads currently populate only childKind; pin the absent child id as-is.
+            assertEquals(Optional.empty(), entry.childId());
+        }));
     }
 
     @Test
@@ -253,14 +262,19 @@ class ChangeLogServiceTest {
                 changeLogDao);
     }
 
-    private Set<ChangeLog> capturedEntries() {
-        ArgumentCaptor<Set> captor = ArgumentCaptor.forClass(Set.class);
+    private Collection<ChangeLog> capturedEntries() {
+        ArgumentCaptor<Collection<ChangeLog>> captor = collectionCaptor();
         verify(changeLogDao).write(captor.capture());
-        return (Set<ChangeLog>) captor.getValue();
+        return captor.getValue();
     }
 
-    private static Set<EntityReference> parents(Set<ChangeLog> entries) {
-        return entries.stream().map(ChangeLog::parentReference).collect(java.util.stream.Collectors.toSet());
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Collection<ChangeLog>> collectionCaptor() {
+        return (ArgumentCaptor<Collection<ChangeLog>>) (ArgumentCaptor<?>) ArgumentCaptor.forClass(Collection.class);
+    }
+
+    private static Set<EntityReference> parents(Collection<ChangeLog> entries) {
+        return entries.stream().map(ChangeLog::parentReference).collect(Collectors.toSet());
     }
 
     private static EntityReference ref(EntityKind kind, long id, String name) {

@@ -69,15 +69,17 @@ class SettingsServiceTest {
     }
 
     @Test
-    void getValueReturnsEmptyForAbsentOrNullValueSettings() {
+    void getValueReturnsEmptyForAbsentOrUnsetValueSettings() {
         when(settingsDao.getByName("absent")).thenReturn(null);
-        Setting nullValue = mock(Setting.class);
-        when(nullValue.value()).thenReturn(null);
-        when(settingsDao.getByName("null-value")).thenReturn(nullValue);
+        Setting unsetValue = ImmutableSetting.builder()
+                .name("unset-value")
+                .description("description")
+                .build();
+        when(settingsDao.getByName("unset-value")).thenReturn(unsetValue);
         SettingsService service = new SettingsService(settingsDao, List.of());
 
         assertEquals(Optional.empty(), service.getValue("absent"));
-        assertThrows(NullPointerException.class, () -> service.getValue("null-value"));
+        assertEquals(Optional.empty(), service.getValue("unset-value"));
     }
 
     @Test

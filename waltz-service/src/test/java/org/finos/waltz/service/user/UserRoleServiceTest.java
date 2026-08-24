@@ -29,7 +29,6 @@ import org.finos.waltz.model.user.*;
 import org.finos.waltz.service.changelog.ChangeLogService;
 import org.finos.waltz.service.person.PersonService;
 import org.finos.waltz.service.settings.SettingsService;
-import org.jooq.lambda.tuple.Tuple2;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -42,6 +41,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.finos.waltz.common.SetUtilities.asSet;
+import static org.jooq.lambda.tuple.Tuple.tuple;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -267,6 +267,6 @@ class UserRoleServiceTest {
         inOrder.verify(changeLogService).write(anySet());
         inOrder.verify(userRoleDao).replaceRoles(anySet());
 
-        verify(userRoleDao).addRoles(eq(asSet(org.jooq.lambda.tuple.Tuple.tuple("target", "admin"))));
+        verify(userRoleDao).addRoles(eq(asSet(tuple("target", "admin"))));
     }
 }
