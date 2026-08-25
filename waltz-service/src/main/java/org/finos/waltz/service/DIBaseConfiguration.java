@@ -28,7 +28,6 @@ import org.jooq.SQLDialect;
 import org.jooq.conf.Settings;
 import org.jooq.impl.DSL;
 import org.jooq.impl.DefaultConfiguration;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
@@ -98,7 +97,6 @@ public class DIBaseConfiguration {
 
 
     @Bean
-    @Autowired
     public DSLContext dsl(DataSource dataSource) {
         try {
             SQLDialect.valueOf(dialect);
