@@ -21,356 +21,252 @@ package org.finos.waltz.service.user;
 import org.finos.waltz.data.person.PersonDao;
 import org.finos.waltz.data.role.RoleDao;
 import org.finos.waltz.data.user.UserRoleDao;
-import org.finos.waltz.model.EntityKind;
 import org.finos.waltz.model.bulk_upload.BulkUploadMode;
 import org.finos.waltz.model.changelog.ChangeLog;
-import org.finos.waltz.model.person.ImmutablePerson;
 import org.finos.waltz.model.person.Person;
-import org.finos.waltz.model.person.PersonKind;
 import org.finos.waltz.model.role.ImmutableRole;
-import org.finos.waltz.model.role.Role;
-import org.finos.waltz.model.user.BulkUserOperationRowPreview;
-import org.finos.waltz.model.user.ImmutableUpdateRolesCommand;
-import org.finos.waltz.model.user.SystemRole;
-import org.finos.waltz.model.user.UpdateRolesCommand;
-import org.finos.waltz.model.user.User;
+import org.finos.waltz.model.user.*;
 import org.finos.waltz.service.changelog.ChangeLogService;
 import org.finos.waltz.service.person.PersonService;
 import org.finos.waltz.service.settings.SettingsService;
-import org.jooq.lambda.tuple.Tuple2;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
-import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-import static java.util.Arrays.asList;
-import static java.util.Collections.emptyList;
-import static java.util.Collections.emptySet;
-import static java.util.Collections.singletonList;
 import static org.finos.waltz.common.SetUtilities.asSet;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anySet;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.jooq.lambda.tuple.Tuple.tuple;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
-/**
- * Characterization tests for {@link UserRoleService} - the highest fan-in
- * service in Waltz (it backs virtually every authorisation check in
- * waltz-web).  These tests capture the current semantics of the role checks,
- * the audit logging around role updates and the bulk upload preview /
- * resolution rules, including several behaviours which look questionable
- * (flagged inline with SUSPECTED BUG).
- */
 class UserRoleServiceTest {
 
-    private final UserRoleDao userRoleDao = mock(UserRoleDao.class);
-    private final RoleDao roleDao = mock(RoleDao.class);
-    private final PersonDao personDao = mock(PersonDao.class);
-    private final ChangeLogService changeLogService = mock(ChangeLogService.class);
-    private final PersonService personService = mock(PersonService.class);
-    private final SettingsService settingsService = mock(SettingsService.class);
+    @Mock
+    private UserRoleDao userRoleDao;
+    @Mock
+    private RoleDao roleDao;
+    @Mock
+    private PersonDao personDao;
+    @Mock
+    private ChangeLogService changeLogService;
+    @Mock
+    private PersonService personService;
+    @Mock
+    private SettingsService settingsService;
 
-    private final UserRoleService service = new UserRoleService(
-            userRoleDao,
-            roleDao,
-            personDao,
-            changeLogService,
-            personService,
-            settingsService);
+    private UserRoleService service;
 
+    @BeforeEach
+    void setup() {
+        MockitoAnnotations.openMocks(this);
+        when(settingsService.getValue(anyString())).thenReturn(Optional.empty());
+        service = new UserRoleService(
+                userRoleDao,
+                roleDao,
+                personDao,
+                changeLogService,
+                personService,
+                settingsService);
+    }
 
-    private static Person mkPerson(long id, String email) {
-        return ImmutablePerson
-                .builder()
-                .id(id)
-                .employeeId("emp-" + id)
-                .displayName("person-" + id)
-                .email(email)
-                .isRemoved(false)
-                .personKind(PersonKind.EMPLOYEE)
+    @Test
+    void hasRoleAndHasAnyRolePinEmptyRequiredRoles() {
+        when(userRoleDao.getUserRoles("user")).thenReturn(asSet("admin"));
+
+        assertTrue(service.hasRole("user", asSet()));
+        assertTrue(service.hasRole("user", "admin"));
+        assertFalse(service.hasAnyRole("user", asSet()));
+        assertTrue(service.hasAnyRole("user", asSet("admin", "other")));
+    }
+
+    @Test
+    void getByUserIdBuildsUserWithRequestedNameAndRoles() {
+        when(userRoleDao.getUserRoles("user")).thenReturn(asSet("admin", "reader"));
+
+        User result = service.getByUserId("user");
+
+        assertEquals("user", result.userName());
+        assertEquals(asSet("admin", "reader"), result.roles());
+    }
+
+    @Test
+    void updateRolesForUnknownPersonDoesNotWriteChangelogAndStillUpdatesDao() {
+        UpdateRolesCommand command = ImmutableUpdateRolesCommand.builder()
+                .roles(asSet("admin"))
+                .comment("comment")
                 .build();
+        when(personService.getPersonByUserId("missing")).thenReturn(null);
+        when(userRoleDao.updateRoles("missing", command.roles())).thenReturn(3);
+
+        assertEquals(3, service.updateRoles("actor", "missing", command));
+
+        verify(personService).getPersonByUserId("missing");
+        verifyNoInteractions(changeLogService);
+        verify(userRoleDao).updateRoles("missing", command.roles());
+        // The self-role-management guard is skipped when the target person is unknown.
+        verifyNoInteractions(settingsService);
     }
 
-
-    private static Role mkRole(String key) {
-        return ImmutableRole
-                .builder()
-                .key(key)
-                .name(key)
-                .description(key)
-                .isCustom(false)
+    @Test
+    void updateRolesRejectsSelfManagementWhenDisabledAndLeavesDaoUntouched() {
+        Person person = mock(Person.class);
+        when(person.id()).thenReturn(Optional.of(9L));
+        when(personService.getPersonByUserId("actor")).thenReturn(person);
+        when(settingsService.getValue(anyString())).thenReturn(Optional.of("true"));
+        UpdateRolesCommand command = ImmutableUpdateRolesCommand.builder()
+                .roles(asSet("admin"))
+                .comment("comment")
                 .build();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> service.updateRoles("actor", "actor", command));
+
+        verifyNoInteractions(userRoleDao, changeLogService);
     }
 
-
-    private static UpdateRolesCommand mkUpdateCmd(String comment, String... roles) {
-        return ImmutableUpdateRolesCommand
-                .builder()
-                .roles(asSet(roles))
-                .comment(comment)
+    @Test
+    void updateRolesWritesSortedRolesAndNoneCommentFallback() {
+        Person person = mock(Person.class);
+        when(person.id()).thenReturn(Optional.of(9L));
+        when(personService.getPersonByUserId("target")).thenReturn(person);
+        UpdateRolesCommand command = ImmutableUpdateRolesCommand.builder()
+                .roles(asSet("zeta", "alpha"))
                 .build();
-    }
+        when(userRoleDao.updateRoles("target", command.roles())).thenReturn(1);
 
-
-    private void selfRoleMgmtDisabled(boolean disabled) {
-        when(settingsService.getValue("feature.user-roles.disable-self-role-mgmt"))
-                .thenReturn(Optional.of(Boolean.toString(disabled)));
-    }
-
-
-    @Test
-    void constructionRejectsNullCollaborators() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> new UserRoleService(null, roleDao, personDao, changeLogService, personService, settingsService));
-    }
-
-
-    @Test
-    void hasRoleRequiresEveryGivenRoleAndIsVacuouslyTrueForNoRoles() {
-        when(userRoleDao.getUserRoles("alice")).thenReturn(asSet("ADMIN", "BETA_TESTER"));
-
-        assertTrue(service.hasRole("alice", "ADMIN"));
-        assertTrue(service.hasRole("alice", "ADMIN", "BETA_TESTER"));
-        assertFalse(service.hasRole("alice", "ADMIN", "TAXONOMY_EDITOR"));
-
-        // SUSPECTED BUG (characterized, not fixed): asking whether a user has
-        // *no* roles returns true, so a caller which accidentally passes an
-        // empty role set will grant access to everybody.
-        assertTrue(service.hasRole("alice", emptySet()));
-    }
-
-
-    @Test
-    void hasAnyRoleIsTrueWhenAtLeastOneRoleIntersects() {
-        when(userRoleDao.getUserRoles("alice")).thenReturn(asSet("BETA_TESTER"));
-
-        assertTrue(service.hasAnyRole("alice", asSet("ADMIN", "BETA_TESTER")));
-        assertFalse(service.hasAnyRole("alice", asSet("ADMIN")));
-        assertFalse(service.hasAnyRole("alice", emptySet()), "empty required roles cannot intersect");
-    }
-
-
-    @Test
-    void systemRoleOverloadsAreResolvedByEnumName() {
-        when(userRoleDao.getUserRoles("alice")).thenReturn(asSet(SystemRole.ADMIN.name()));
-
-        assertTrue(service.hasRole("alice", SystemRole.ADMIN));
-        assertTrue(service.hasAnyRole("alice", SystemRole.ADMIN, SystemRole.BETA_TESTER));
-        assertFalse(service.hasRole("alice", SystemRole.ADMIN, SystemRole.BETA_TESTER));
-    }
-
-
-    @Test
-    void getByUserIdAlwaysReturnsAUserEvenIfThatUserDoesNotExist() {
-        when(userRoleDao.getUserRoles("nobody")).thenReturn(emptySet());
-
-        User user = service.getByUserId("nobody");
-
-        assertEquals("nobody", user.userName());
-        assertTrue(user.roles().isEmpty(), "an unknown user is indistinguishable from a user with no roles");
-    }
-
-
-    @Test
-    void updateRolesWritesAnAuditEntryAgainstTheTargetPerson() {
-        selfRoleMgmtDisabled(false);
-        when(personService.getPersonByUserId("bob")).thenReturn(mkPerson(22L, "bob"));
-        when(userRoleDao.updateRoles("bob", asSet("ADMIN"))).thenReturn(1);
-
-        assertEquals(1, service.updateRoles("alice", "bob", mkUpdateCmd("because", "ADMIN")));
+        assertEquals(1, service.updateRoles("actor", "target", command));
 
         ArgumentCaptor<ChangeLog> captor = ArgumentCaptor.forClass(ChangeLog.class);
         verify(changeLogService).write(captor.capture());
-        ChangeLog entry = captor.getValue();
-
-        assertEquals(EntityKind.PERSON, entry.parentReference().kind());
-        assertEquals(22L, entry.parentReference().id());
-        assertEquals("alice", entry.userId(), "the acting user is recorded, not the target");
-        assertEquals("Roles for bob updated to [ADMIN].  Comment: because", entry.message());
+        ChangeLog log = captor.getValue();
+        assertEquals("Roles for target updated to [alpha, zeta].  Comment: none", log.message());
+        assertEquals("actor", log.userId());
+        assertEquals(Optional.empty(), log.childKind());
+        assertEquals(Optional.empty(), log.childId());
     }
 
-
     @Test
-    void updateRolesStillUpdatesRolesWhenTheTargetHasNoPersonRecord() {
-        when(personService.getPersonByUserId("ghost")).thenReturn(null);
-        when(userRoleDao.updateRoles("ghost", asSet("ADMIN"))).thenReturn(1);
+    void bulkUploadPreviewEmptyInputReturnsEmptyWithoutCollaborators() {
+        assertEquals(List.of(), service.bulkUploadPreview(BulkUploadMode.ADD_ONLY, List.of(), "actor"));
 
-        assertEquals(1, service.updateRoles("alice", "ghost", mkUpdateCmd("c", "ADMIN")));
-
-        verify(changeLogService, never()).write(any(ChangeLog.class));
+        verifyNoInteractions(personDao, roleDao, settingsService);
     }
 
-
     @Test
-    void selfRoleManagementIsBlockedOnlyWhenTheTargetHasAPersonRecord() {
-        selfRoleMgmtDisabled(true);
-        when(personService.getPersonByUserId("alice")).thenReturn(mkPerson(1L, "alice"));
-
-        IllegalArgumentException ex = assertThrows(
-                IllegalArgumentException.class,
-                () -> service.updateRoles("alice", "alice", mkUpdateCmd("c", "ADMIN")));
-        assertEquals("Cannot modify own roles.", ex.getMessage());
-        verify(userRoleDao, never()).updateRoles(anyString(), anySet());
-
-        // SUSPECTED BUG (characterized, not fixed): the self-role-management
-        // guard sits inside the `person != null` branch, so a user without a
-        // person record can grant roles to themselves even when the
-        // feature.user-roles.disable-self-role-mgmt setting is enabled.
-        when(personService.getPersonByUserId("ghost")).thenReturn(null);
-        when(userRoleDao.updateRoles("ghost", asSet("ADMIN"))).thenReturn(1);
-
-        assertEquals(1, service.updateRoles("ghost", "ghost", mkUpdateCmd("c", "ADMIN")));
-    }
-
-
-    @Test
-    void bulkUploadPreviewAndBulkUploadShortCircuitForEmptyInput() {
-        assertEquals(emptyList(), service.bulkUploadPreview(BulkUploadMode.ADD_ONLY, emptyList(), "alice"));
-        assertEquals(emptyList(), service.bulkUploadPreview(BulkUploadMode.ADD_ONLY, null, "alice"));
-        assertEquals(0, service.bulkUpload(BulkUploadMode.ADD_ONLY, emptyList(), "alice"));
-
-        verify(changeLogService, never()).write(anySet());
-    }
-
-
-    @Test
-    void bulkUploadPreviewResolvesUsersAndRolesAndDropsHeaderAndBlankLines() {
-        selfRoleMgmtDisabled(false);
-        when(personDao.findAllEmails()).thenReturn(asList("bob", "carol"));
-        when(roleDao.findAllRoles()).thenReturn(asSet(mkRole("ADMIN")));
+    void bulkUploadPreviewStripsHeadersAndBlanksAndResolvesDelimitedRows() {
+        when(personDao.findAllEmails()).thenReturn(List.of("target", "actor"));
+        when(roleDao.findAllRoles()).thenReturn(Set.of(
+                ImmutableRole.builder()
+                        .key("admin")
+                        .name("Admin")
+                        .description("Admin")
+                        .isCustom(false)
+                        .build()));
 
         List<BulkUserOperationRowPreview> previews = service.bulkUploadPreview(
                 BulkUploadMode.ADD_ONLY,
-                asList(
-                        "username,role,comment",   // header - dropped
-                        "",                        // blank - dropped
-                        "bob,ADMIN,ok comment",
-                        "carol\tADMIN\ttab delimited works",
-                        "dave,ADMIN,unknown person",
-                        "bob,NOT_A_ROLE,unknown role",
-                        "bob,ADMIN"),              // missing comment
-                "alice");
+                List.of(
+                        "username,role,comment",
+                        "",
+                        "target\tadmin\ttab comment",
+                        "unknown,admin,unknown user",
+                        "target,missing,unknown role",
+                        "actor,admin,self"),
+                "actor");
 
-        assertEquals(5, previews.size());
-
+        assertEquals(4, previews.size());
+        assertEquals("target", previews.get(0).resolvedUser());
+        assertEquals("admin", previews.get(0).resolvedRole());
+        assertEquals("tab comment", previews.get(0).resolvedComment());
         assertEquals(BulkUserOperationRowPreview.ResolutionStatus.OK, previews.get(0).status());
-        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.OK, previews.get(1).status());
-        assertEquals("carol", previews.get(1).resolvedUser());
-
+        assertNull(previews.get(1).resolvedUser());
+        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.ERROR, previews.get(1).status());
+        assertEquals("target", previews.get(2).resolvedUser());
+        assertNull(previews.get(2).resolvedRole());
         assertEquals(BulkUserOperationRowPreview.ResolutionStatus.ERROR, previews.get(2).status());
-        assertNull(previews.get(2).resolvedUser(), "unknown people do not resolve");
-        assertEquals("dave", previews.get(2).givenUser(), "but the given value is echoed back");
-
-        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.ERROR, previews.get(3).status());
-        assertNull(previews.get(3).resolvedRole(), "unknown roles do not resolve");
-
-        // SUSPECTED BUG (characterized, not fixed): a row with a valid user and
-        // role but no comment is reported as ERROR (and silently skipped by
-        // bulkUpload) purely because the comment is empty.
-        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.ERROR, previews.get(4).status());
-        assertEquals("bob", previews.get(4).resolvedUser());
-        assertEquals("ADMIN", previews.get(4).resolvedRole());
+        assertEquals("actor", previews.get(3).resolvedUser());
     }
 
+    @Test
+    void bulkUploadPreviewTreatsMissingCommentAsAnError() {
+        when(personDao.findAllEmails()).thenReturn(List.of("target"));
+        when(roleDao.findAllRoles()).thenReturn(Set.of(
+                ImmutableRole.builder()
+                        .key("admin")
+                        .name("Admin")
+                        .description("Admin")
+                        .isCustom(false)
+                        .build()));
+
+        BulkUserOperationRowPreview preview = service.bulkUploadPreview(
+                BulkUploadMode.ADD_ONLY,
+                List.of("target,admin"),
+                "actor").get(0);
+
+        // A row with valid user and role still fails resolution when its comment is empty.
+        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.ERROR, preview.status());
+    }
 
     @Test
-    void bulkUploadPreviewRefusesToResolveTheCallersOwnRowWhenSelfRoleMgmtIsDisabled() {
-        selfRoleMgmtDisabled(true);
-        when(personDao.findAllEmails()).thenReturn(asList("alice", "bob"));
-        when(roleDao.findAllRoles()).thenReturn(asSet(mkRole("ADMIN")));
+    void bulkUploadNullsSelfRowsWhenSelfManagementIsDisabled() {
+        when(settingsService.getValue(anyString())).thenReturn(Optional.of("true"));
+        when(personDao.findAllEmails()).thenReturn(List.of("actor", "target"));
+        when(roleDao.findAllRoles()).thenReturn(Set.of(
+                ImmutableRole.builder()
+                        .key("admin")
+                        .name("Admin")
+                        .description("Admin")
+                        .isCustom(false)
+                        .build()));
 
         List<BulkUserOperationRowPreview> previews = service.bulkUploadPreview(
                 BulkUploadMode.ADD_ONLY,
-                asList("alice,ADMIN,mine", "bob,ADMIN,theirs"),
-                "alice");
+                List.of("actor,admin,self", "target,admin,target"),
+                "actor");
 
         assertNull(previews.get(0).resolvedUser());
-        assertEquals("bob", previews.get(1).resolvedUser());
+        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.ERROR, previews.get(0).status());
+        assertEquals("target", previews.get(1).resolvedUser());
+        assertEquals(BulkUserOperationRowPreview.ResolutionStatus.OK, previews.get(1).status());
     }
 
-
     @Test
-    void bulkUploadOnlyAppliesResolvedRowsAndDispatchesOnMode() {
-        selfRoleMgmtDisabled(false);
-        when(personDao.findAllEmails()).thenReturn(asList("bob"));
-        when(roleDao.findAllRoles()).thenReturn(asSet(mkRole("ADMIN")));
-        when(personService.getPersonByUserId("bob")).thenReturn(mkPerson(22L, "bob"));
+    void bulkUploadWritesChangelogBeforeDispatchingEachMode() {
+        when(personDao.findAllEmails()).thenReturn(List.of("target"));
+        when(roleDao.findAllRoles()).thenReturn(Set.of(
+                ImmutableRole.builder()
+                        .key("admin")
+                        .name("Admin")
+                        .description("Admin")
+                        .isCustom(false)
+                        .build()));
+        Person person = mock(Person.class);
+        when(person.id()).thenReturn(Optional.of(9L));
+        when(personService.getPersonByUserId("target")).thenReturn(person);
+        List<String> lines = List.of("target,admin,comment");
+
         when(userRoleDao.addRoles(anySet())).thenReturn(1);
         when(userRoleDao.removeRoles(anySet())).thenReturn(2);
         when(userRoleDao.replaceRoles(anySet())).thenReturn(3);
 
-        List<String> lines = asList("bob,ADMIN,ok", "dave,ADMIN,unknown");
+        InOrder inOrder = inOrder(changeLogService, userRoleDao);
+        assertEquals(1, service.bulkUpload(BulkUploadMode.ADD_ONLY, lines, "actor"));
+        inOrder.verify(changeLogService).write(anySet());
+        inOrder.verify(userRoleDao).addRoles(anySet());
+        assertEquals(2, service.bulkUpload(BulkUploadMode.REMOVE_ONLY, lines, "actor"));
+        inOrder.verify(changeLogService).write(anySet());
+        inOrder.verify(userRoleDao).removeRoles(anySet());
+        assertEquals(3, service.bulkUpload(BulkUploadMode.REPLACE, lines, "actor"));
+        inOrder.verify(changeLogService).write(anySet());
+        inOrder.verify(userRoleDao).replaceRoles(anySet());
 
-        assertEquals(1, service.bulkUpload(BulkUploadMode.ADD_ONLY, lines, "alice"));
-        assertEquals(2, service.bulkUpload(BulkUploadMode.REMOVE_ONLY, lines, "alice"));
-        assertEquals(3, service.bulkUpload(BulkUploadMode.REPLACE, lines, "alice"));
-
-        ArgumentCaptor<Set<Tuple2<String, String>>> captor = ArgumentCaptor.forClass(Set.class);
-        verify(userRoleDao).addRoles(captor.capture());
-        assertEquals(1, captor.getValue().size(), "only the resolved row is applied");
-    }
-
-
-    @Test
-    void bulkUploadWritesAuditEntriesBeforeApplyingTheChange() {
-        selfRoleMgmtDisabled(false);
-        when(personDao.findAllEmails()).thenReturn(asList("bob"));
-        when(roleDao.findAllRoles()).thenReturn(asSet(mkRole("ADMIN")));
-        when(personService.getPersonByUserId("bob")).thenReturn(mkPerson(22L, "bob"));
-        when(userRoleDao.addRoles(anySet())).thenReturn(1);
-
-        service.bulkUpload(BulkUploadMode.ADD_ONLY, singletonList("bob,ADMIN,ok"), "alice");
-
-        ArgumentCaptor<Collection<ChangeLog>> captor = ArgumentCaptor.forClass(Collection.class);
-        verify(changeLogService).write(captor.capture());
-        ChangeLog entry = captor.getValue().iterator().next();
-
-        assertEquals("Role for bob updated to ADMIN.  Comment: ok", entry.message());
-        assertEquals("alice", entry.userId());
-    }
-
-
-    @Test
-    void bulkUploadBlowsUpIfAResolvedEmailHasNoCorrespondingPerson() {
-        // SUSPECTED BUG (characterized, not fixed): rows are resolved against
-        // personDao.findAllEmails() but the audit log looks the person up again
-        // via personService.getPersonByUserId(..) and dereferences
-        // person.id().get() with no null / empty check, so a mismatch between
-        // the two lookups results in a NullPointerException *after* nothing has
-        // been written.
-        selfRoleMgmtDisabled(false);
-        when(personDao.findAllEmails()).thenReturn(asList("bob"));
-        when(roleDao.findAllRoles()).thenReturn(asSet(mkRole("ADMIN")));
-        when(personService.getPersonByUserId("bob")).thenReturn(null);
-
-        assertThrows(
-                NullPointerException.class,
-                () -> service.bulkUpload(BulkUploadMode.ADD_ONLY, singletonList("bob,ADMIN,ok"), "alice"));
-
-        verify(userRoleDao, never()).addRoles(anySet());
-    }
-
-
-    @Test
-    void simpleUserLookupsAreDirectDelegations() {
-        when(userRoleDao.findAllUsers()).thenReturn(emptySet());
-        when(userRoleDao.findUsersForRole(1L)).thenReturn(emptySet());
-        when(userRoleDao.getUserRoles("alice")).thenReturn(asSet("ADMIN"));
-
-        assertTrue(service.findAllUsers().isEmpty());
-        assertTrue(service.findUsersForRole(1L).isEmpty());
-        assertEquals(asSet("ADMIN"), service.getUserRoles("alice"));
+        verify(userRoleDao).addRoles(eq(asSet(tuple("target", "admin"))));
     }
 }

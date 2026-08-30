@@ -28,244 +28,262 @@ import org.finos.waltz.data.measurable_rating_planned_decommission.MeasurableRat
 import org.finos.waltz.data.measurable_rating_replacement.MeasurableRatingReplacementDao;
 import org.finos.waltz.data.physical_flow.PhysicalFlowDao;
 import org.finos.waltz.data.physical_specification.PhysicalSpecificationDao;
-import org.finos.waltz.model.EntityKind;
-import org.finos.waltz.model.EntityReference;
-import org.finos.waltz.model.Operation;
-import org.finos.waltz.model.Severity;
+import org.finos.waltz.model.*;
 import org.finos.waltz.model.changelog.ChangeLog;
-import org.finos.waltz.model.changelog.ImmutableChangeLog;
-import org.finos.waltz.model.logical_flow.ImmutableLogicalFlow;
 import org.finos.waltz.model.logical_flow.LogicalFlow;
+import org.finos.waltz.model.measurable_rating.MeasurableRating;
+import org.finos.waltz.model.measurable_rating_planned_decommission.MeasurableRatingPlannedDecommission;
+import org.finos.waltz.model.measurable_rating_replacement.MeasurableRatingReplacement;
+import org.finos.waltz.model.physical_flow.PhysicalFlow;
+import org.finos.waltz.model.physical_specification.PhysicalSpecification;
 import org.jooq.DSLContext;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
-import java.sql.Date;
-import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.Collection;
+import java.util.stream.Collectors;
 
-import static java.util.Collections.emptyList;
-import static java.util.stream.Collectors.toSet;
-import static org.finos.waltz.common.SetUtilities.asSet;
-import static org.finos.waltz.common.SetUtilities.map;
-import static org.finos.waltz.model.EntityReference.mkRef;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyCollection;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+import static org.finos.waltz.model.EntityKind.*;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
-/**
- * Characterization tests for {@link ChangeLogService}, the audit seam used by
- * (almost) every mutating service in Waltz.  The interesting logic is the
- * kind-based dispatch in
- * {@code writeChangeLogEntries(EntityReference, ..)} and the derivation of the
- * set of parent entities which each audit message is fanned out to.
- */
 class ChangeLogServiceTest {
 
-    private final ChangeLogDao changeLogDao = mock(ChangeLogDao.class);
-    private final ChangeLogSummariesDao changeLogSummariesDao = mock(ChangeLogSummariesDao.class);
-    private final PhysicalFlowDao physicalFlowDao = mock(PhysicalFlowDao.class);
-    private final PhysicalSpecificationDao physicalSpecificationDao = mock(PhysicalSpecificationDao.class);
-    private final LogicalFlowDao logicalFlowDao = mock(LogicalFlowDao.class);
-    private final ApplicationDao applicationDao = mock(ApplicationDao.class);
-    private final MeasurableRatingReplacementDao measurableRatingReplacementDao = mock(MeasurableRatingReplacementDao.class);
-    private final MeasurableRatingDao measurableRatingDao = mock(MeasurableRatingDao.class);
-    private final MeasurableRatingPlannedDecommissionDao measurableRatingPlannedDecommissionDao = mock(MeasurableRatingPlannedDecommissionDao.class);
-    private final EntityReferenceNameResolver nameResolver = mock(EntityReferenceNameResolver.class);
+    @Mock private ChangeLogDao changeLogDao;
+    @Mock private ChangeLogSummariesDao changeLogSummariesDao;
+    @Mock private PhysicalFlowDao physicalFlowDao;
+    @Mock private PhysicalSpecificationDao physicalSpecificationDao;
+    @Mock private LogicalFlowDao logicalFlowDao;
+    @Mock private ApplicationDao applicationDao;
+    @Mock private MeasurableRatingReplacementDao replacementDao;
+    @Mock private MeasurableRatingDao measurableRatingDao;
+    @Mock private MeasurableRatingPlannedDecommissionDao plannedDecommissionDao;
+    @Mock private EntityReferenceNameResolver nameResolver;
 
-    private final ChangeLogService service = new ChangeLogService(
-            changeLogDao,
-            changeLogSummariesDao,
-            physicalFlowDao,
-            physicalSpecificationDao,
-            logicalFlowDao,
-            applicationDao,
-            measurableRatingReplacementDao,
-            measurableRatingDao,
-            measurableRatingPlannedDecommissionDao,
-            nameResolver);
+    private ChangeLogService service;
 
-    private final EntityReference source = mkRef(EntityKind.APPLICATION, 1L, "App A");
-    private final EntityReference target = mkRef(EntityKind.APPLICATION, 2L, "App B");
-
-    private final LogicalFlow logicalFlow = ImmutableLogicalFlow
-            .builder()
-            .id(100L)
-            .source(source)
-            .target(target)
-            .lastUpdatedBy("tester")
-            .build();
-
-
-    @Test
-    void constructionRejectsNullCollaborators() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> new ChangeLogService(
-                        null,
-                        changeLogSummariesDao,
-                        physicalFlowDao,
-                        physicalSpecificationDao,
-                        logicalFlowDao,
-                        applicationDao,
-                        measurableRatingReplacementDao,
-                        measurableRatingDao,
-                        measurableRatingPlannedDecommissionDao,
-                        nameResolver));
+    @BeforeEach
+    void setup() {
+        MockitoAnnotations.openMocks(this);
+        service = new ChangeLogService(
+                changeLogDao,
+                changeLogSummariesDao,
+                physicalFlowDao,
+                physicalSpecificationDao,
+                logicalFlowDao,
+                applicationDao,
+                replacementDao,
+                measurableRatingDao,
+                plannedDecommissionDao,
+                nameResolver);
     }
 
-
     @Test
-    void readsAreDelegatedToTheDaoButRequireANonNullReference() {
-        EntityReference ref = mkRef(EntityKind.APPLICATION, 1L);
-        Date start = Date.valueOf("2020-01-01");
-        Date end = Date.valueOf("2020-12-31");
-        List<ChangeLog> entries = emptyList();
-
-        when(changeLogDao.findByParentReferenceForDateRange(ref, start, end, Optional.empty())).thenReturn(entries);
-        when(changeLogDao.findByPersonReferenceForDateRange(ref, start, end, Optional.empty())).thenReturn(entries);
-        when(changeLogDao.findByParentReference(ref, Optional.empty(), Optional.empty())).thenReturn(entries);
-        when(changeLogDao.findByPersonReference(ref, Optional.empty(), Optional.empty())).thenReturn(entries);
-        when(changeLogDao.findUnattestedChanges(ref)).thenReturn(entries);
-
-        assertSame(entries, service.findByParentReferenceForDateRange(ref, start, end, Optional.empty()));
-        assertSame(entries, service.findByPersonReferenceForDateRange(ref, start, end, Optional.empty()));
-        assertSame(entries, service.findByParentReference(ref, Optional.empty(), Optional.empty()));
-        assertSame(entries, service.findByPersonReference(ref, Optional.empty(), Optional.empty()));
-        assertSame(entries, service.findUnattestedChanges(ref));
-
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> service.findByParentReference(null, Optional.empty(), Optional.empty()));
-    }
-
-
-    @Test
-    void findByUserRejectsEmptyUsernames() {
-        assertThrows(IllegalArgumentException.class, () -> service.findByUser("", Optional.empty()));
-        assertThrows(IllegalArgumentException.class, () -> service.findByUser(null, Optional.empty()));
-    }
-
-
-    @Test
-    void writeWithoutATransactionPassesAnEmptyTransactionToTheDao() {
-        ChangeLog entry = ImmutableChangeLog
-                .builder()
-                .parentReference(source)
-                .message("m")
-                .severity(Severity.INFORMATION)
-                .userId("tester")
-                .operation(Operation.UPDATE)
-                .build();
-
-        when(changeLogDao.write(Optional.empty(), entry)).thenReturn(1);
-
-        assertEquals(1, service.write(entry));
-        verify(changeLogDao).write(Optional.empty(), entry);
-    }
-
-
-    @Test
-    void writeWithATransactionAndBatchWritesAreDirectDelegations() {
+    void writeOverloadsDelegateToDao() {
+        ChangeLog changeLog = mock(ChangeLog.class);
         DSLContext tx = mock(DSLContext.class);
-        ChangeLog entry = ImmutableChangeLog
-                .builder()
-                .parentReference(source)
-                .message("m")
-                .severity(Severity.INFORMATION)
-                .userId("tester")
-                .operation(Operation.UPDATE)
-                .build();
+        when(changeLogDao.write(any(Optional.class), same(changeLog))).thenReturn(7);
+        when(changeLogDao.write(anyCollection())).thenReturn(new int[]{1, 2});
 
-        when(changeLogDao.write(Optional.of(tx), entry)).thenReturn(1);
-        when(changeLogDao.write(asSet(entry))).thenReturn(new int[]{1});
-
-        assertEquals(1, service.write(Optional.of(tx), entry));
-        assertEquals(1, service.write(asSet(entry)).length);
+        assertEquals(7, service.write(changeLog));
+        assertEquals(7, service.write(Optional.of(tx), changeLog));
+        assertArrayEquals(new int[]{1, 2}, service.write(List.of(changeLog)));
+        verify(changeLogDao).write(Optional.empty(), changeLog);
+        verify(changeLogDao).write(Optional.of(tx), changeLog);
+        verify(changeLogDao).write(List.of(changeLog));
     }
 
-
     @Test
-    void writingLogicalFlowEntriesFansOutToTheFlowAndBothEndpoints() {
-        service.writeChangeLogEntries(logicalFlow, "tester", "was updated", Operation.UPDATE);
-
-        Collection<ChangeLog> written = captureWrittenEntries();
-
-        assertEquals(
-                asSet(logicalFlow.entityReference(), source, target),
-                map(written, ChangeLog::parentReference),
-                "the flow itself plus its source and target are audited");
-
-        Set<String> messages = written.stream().map(ChangeLog::message).collect(toSet());
-        assertEquals(
-                asSet("Logical flow from: App A [1], to: App B [2]: was updated"),
-                messages);
-
-        written.forEach(cl -> {
-            assertEquals(Severity.INFORMATION, cl.severity(), "audit entries are always INFORMATION");
-            assertEquals(Optional.of(EntityKind.LOGICAL_DATA_FLOW), cl.childKind());
-            assertEquals(Optional.of(100L), cl.childId());
-            assertEquals(Operation.UPDATE, cl.operation());
-            assertEquals("tester", cl.userId());
-        });
+    void findByUserRejectsEmptyUsername() {
+        assertThrows(IllegalArgumentException.class, () -> service.findByUser("", Optional.empty()));
+        verifyNoInteractions(changeLogDao);
     }
 
+    @Test
+    void referenceQueriesRejectNullReferences() {
+        assertThrows(IllegalArgumentException.class,
+                () -> service.findByParentReference(null, Optional.empty(), Optional.empty()));
+        assertThrows(IllegalArgumentException.class,
+                () -> service.findByPersonReference(null, Optional.empty(), Optional.empty()));
+        assertThrows(IllegalArgumentException.class,
+                () -> service.findByParentReferenceForDateRange(null, null, null, Optional.empty()));
+        assertThrows(IllegalArgumentException.class,
+                () -> service.findByPersonReferenceForDateRange(null, null, null, Optional.empty()));
+    }
 
     @Test
-    void logicalFlowEntriesAreLookedUpByIdWhenDispatchingOnAnEntityReference() {
-        when(logicalFlowDao.getByFlowId(100L)).thenReturn(logicalFlow);
+    void logicalFlowDispatchComposesMessageAndFansOutToFlowAndEndpoints() {
+        EntityReference flowRef = ref(LOGICAL_DATA_FLOW, 10, null);
+        EntityReference source = ref(APPLICATION, 1, "Source");
+        EntityReference target = ref(APPLICATION, 2, "Target");
+        LogicalFlow flow = mock(LogicalFlow.class);
+        when(flow.entityReference()).thenReturn(flowRef);
+        when(flow.source()).thenReturn(source);
+        when(flow.target()).thenReturn(target);
+        when(logicalFlowDao.getByFlowId(10L)).thenReturn(flow);
 
+        service.writeChangeLogEntries(flowRef, "actor", "changed", Operation.UPDATE);
+
+        Collection<ChangeLog> entries = capturedEntries();
+        assertEquals(Set.of(flowRef, source, target), parents(entries));
+        assertAll(entries.stream().map(entry -> () -> {
+            assertEquals("Logical flow from: Source [1], to: Target [2]: changed", entry.message());
+            assertEquals(Optional.of(LOGICAL_DATA_FLOW), entry.childKind());
+            assertEquals(Optional.of(10L), entry.childId());
+            assertEquals("actor", entry.userId());
+        }));
+    }
+
+    @Test
+    void physicalFlowDispatchComposesMessageAndFansOutToPhysicalLogicalAndEndpoints() {
+        EntityReference physicalRef = ref(PHYSICAL_FLOW, 30, null);
+        EntityReference logicalRef = ref(LOGICAL_DATA_FLOW, 10, null);
+        EntityReference source = ref(APPLICATION, 1, "Source");
+        EntityReference target = ref(APPLICATION, 2, "Target");
+        PhysicalFlow physical = mock(PhysicalFlow.class);
+        LogicalFlow logical = mock(LogicalFlow.class);
+        PhysicalSpecification specification = mock(PhysicalSpecification.class);
+        when(physical.entityReference()).thenReturn(physicalRef);
+        when(physical.logicalFlowId()).thenReturn(10L);
+        when(physical.specificationId()).thenReturn(20L);
+        when(logical.entityReference()).thenReturn(logicalRef);
+        when(logical.source()).thenReturn(source);
+        when(logical.target()).thenReturn(target);
+        when(specification.name()).thenReturn("Specification");
+        when(logicalFlowDao.getByFlowId(10L)).thenReturn(logical);
+        when(physicalSpecificationDao.getById(20L)).thenReturn(specification);
+        when(physicalFlowDao.getById(30L)).thenReturn(physical);
+
+        service.writeChangeLogEntries(physicalRef, "actor", "changed", Operation.UPDATE);
+
+        Collection<ChangeLog> entries = capturedEntries();
+        assertEquals(Set.of(physicalRef, logicalRef, source, target), parents(entries));
+        assertAll(entries.stream().map(entry -> () -> {
+            assertEquals("Physical flow: Specification, from: Source [1], to: Target [2]: changed",
+                    entry.message());
+            assertEquals(Optional.of(PHYSICAL_FLOW), entry.childKind());
+            assertEquals(Optional.of(30L), entry.childId());
+        }));
+    }
+
+    @Test
+    void physicalSpecificationDispatchIncludesSpecificationAndItsFlows() {
+        EntityReference specRef = ref(PHYSICAL_SPECIFICATION, 20, null);
+        EntityReference flowRef = ref(PHYSICAL_FLOW, 30, null);
+        PhysicalSpecification specification = mock(PhysicalSpecification.class);
+        PhysicalFlow flow = mock(PhysicalFlow.class);
+        when(specification.id()).thenReturn(Optional.of(20L));
+        when(specification.entityReference()).thenReturn(specRef);
+        when(specification.name()).thenReturn("Specification");
+        when(flow.entityReference()).thenReturn(flowRef);
+        when(physicalSpecificationDao.getById(20L)).thenReturn(specification);
+        when(physicalFlowDao.findBySpecificationId(20L)).thenReturn(List.of(flow));
+
+        service.writeChangeLogEntries(specRef, "actor", "changed", Operation.UPDATE);
+
+        Collection<ChangeLog> entries = capturedEntries();
+        assertEquals(Set.of(specRef, flowRef), parents(entries));
+        assertAll(entries.stream().map(entry -> () -> {
+            assertEquals("Physical spec: Specification: changed", entry.message());
+            assertEquals(Optional.of(PHYSICAL_SPECIFICATION), entry.childKind());
+            assertEquals(Optional.of(20L), entry.childId());
+        }));
+    }
+
+    @Test
+    void ratingReplacementAndPlannedDecommissionDispatchPopulateChildKindAndId() {
+        EntityReference replacementRef = ref(MEASURABLE_RATING_REPLACEMENT, 200, "Replacement");
+        EntityReference originalRef = ref(MEASURABLE, 55, "Original");
+        MeasurableRatingReplacement replacement = mock(MeasurableRatingReplacement.class);
+        MeasurableRatingPlannedDecommission decommission = mock(MeasurableRatingPlannedDecommission.class);
+        MeasurableRating rating = mock(MeasurableRating.class);
+        when(replacement.entityReference()).thenReturn(replacementRef);
+        when(replacement.decommissionId()).thenReturn(300L);
+        when(decommission.measurableRatingId()).thenReturn(400L);
+        when(decommission.id()).thenReturn(300L);
+        when(rating.measurableId()).thenReturn(55L);
+        when(rating.entityReference()).thenReturn(originalRef);
+        when(replacementDao.getById(200L)).thenReturn(replacement);
+        when(plannedDecommissionDao.getById(300L)).thenReturn(decommission);
+        when(measurableRatingDao.getById(400L)).thenReturn(rating);
+        when(nameResolver.resolve(ref(MEASURABLE, 55, null)))
+                .thenReturn(Optional.of(ref(MEASURABLE, 55, "Measurable")));
+        when(nameResolver.resolve(ref(MEASURABLE_RATING_REPLACEMENT, 200, null)))
+                .thenReturn(Optional.of(ref(MEASURABLE_RATING_REPLACEMENT, 200, "Replacement")));
+
+        service.writeChangeLogEntries(replacementRef, "actor", "changed", Operation.UPDATE);
+        Collection<ChangeLog> replacementEntries = capturedEntries();
+        assertEquals(Set.of(replacementRef, originalRef), parents(replacementEntries));
+        assertAll(replacementEntries.stream().map(entry -> () -> {
+            assertEquals("Replacement measurable_rating_replacement: Replacement [200], for measurable: Measurable [55] on: Measurable [55]: changed",
+                    entry.message());
+            assertEquals(Optional.of(MEASURABLE_RATING_REPLACEMENT), entry.childKind());
+            // These overloads currently populate only childKind; pin the absent child id as-is.
+            assertEquals(Optional.empty(), entry.childId());
+        }));
+
+        clearInvocations(changeLogDao);
+        when(replacementDao.fetchByDecommissionId(300L)).thenReturn(Set.of(replacement));
         service.writeChangeLogEntries(
-                mkRef(EntityKind.LOGICAL_DATA_FLOW, 100L),
-                "tester",
-                "was removed",
-                Operation.REMOVE);
-
-        assertEquals(3, captureWrittenEntries().size());
-    }
-
-
-    @Test
-    void dispatchingOnAnUnsupportedEntityKindSilentlyDoesNothing() {
-        // note: no exception and no audit trail - callers cannot tell that
-        // their change went unrecorded
-        service.writeChangeLogEntries(
-                mkRef(EntityKind.APPLICATION, 1L),
-                "tester",
-                "was updated",
+                ref(MEASURABLE_RATING_PLANNED_DECOMMISSION, 300, null),
+                "actor",
+                "changed",
                 Operation.UPDATE);
-
-        verify(changeLogDao, never()).write(anyCollection());
-        verifyNoInteractions(logicalFlowDao, physicalFlowDao, physicalSpecificationDao);
+        Collection<ChangeLog> plannedEntries = capturedEntries();
+        assertEquals(Set.of(replacementRef, originalRef), parents(plannedEntries));
+        assertAll(plannedEntries.stream().map(entry -> () -> {
+            assertEquals("Measurable Rating: Measurable [55] on: Measurable [55]: changed",
+                    entry.message());
+            assertEquals(Optional.of(MEASURABLE_RATING_PLANNED_DECOMMISSION), entry.childKind());
+            // These overloads currently populate only childKind; pin the absent child id as-is.
+            assertEquals(Optional.empty(), entry.childId());
+        }));
     }
-
 
     @Test
-    void countByDateForParentKindDelegatesToTheSummariesDao() {
-        when(changeLogSummariesDao.findCountByDateForParentKindBySelector(any(), any())).thenReturn(emptyList());
+    void unhandledKindDoesNothing() {
+        EntityReference ref = ref(APPLICATION, 1, null);
 
-        assertEquals(
-                emptyList(),
-                service.findCountByDateForParentKindBySelector(
-                        EntityKind.APPLICATION,
-                        org.finos.waltz.model.IdSelectionOptions.mkOpts(mkRef(EntityKind.APPLICATION, 1L)),
-                        Optional.empty()));
+        service.writeChangeLogEntries(ref, "actor", "changed", Operation.UPDATE);
+
+        verifyNoInteractions(
+                physicalFlowDao,
+                physicalSpecificationDao,
+                logicalFlowDao,
+                replacementDao,
+                plannedDecommissionDao,
+                changeLogDao);
     }
 
-
-    @SuppressWarnings("unchecked")
-    private Collection<ChangeLog> captureWrittenEntries() {
-        ArgumentCaptor<Collection<ChangeLog>> captor = ArgumentCaptor.forClass(Collection.class);
+    private Collection<ChangeLog> capturedEntries() {
+        ArgumentCaptor<Collection<ChangeLog>> captor = collectionCaptor();
         verify(changeLogDao).write(captor.capture());
         return captor.getValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Collection<ChangeLog>> collectionCaptor() {
+        return (ArgumentCaptor<Collection<ChangeLog>>) (ArgumentCaptor<?>) ArgumentCaptor.forClass(Collection.class);
+    }
+
+    private static Set<EntityReference> parents(Collection<ChangeLog> entries) {
+        return entries.stream().map(ChangeLog::parentReference).collect(Collectors.toSet());
+    }
+
+    private static EntityReference ref(EntityKind kind, long id, String name) {
+        ImmutableEntityReference.Builder builder = ImmutableEntityReference.builder()
+                .kind(kind)
+                .id(id);
+        if (name != null) {
+            builder.name(name);
+        }
+        return builder.build();
     }
 }
