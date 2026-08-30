@@ -19,19 +19,86 @@
 package org.finos.waltz.service.survey.inclusion_evaluator;
 
 import org.apache.commons.jexl3.*;
+import org.apache.commons.jexl3.introspection.JexlSandbox;
 import org.finos.waltz.model.EntityReference;
 import org.finos.waltz.model.survey.SurveyQuestion;
 import org.finos.waltz.model.survey.SurveyQuestionResponse;
 import org.jooq.DSLContext;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.finos.waltz.common.MapUtilities.newHashMap;
 import static org.finos.waltz.common.StringUtilities.isEmpty;
 
 public class QuestionPredicateEvaluator {
+
+    /**
+     * Methods callable from an inclusion predicate.  Anything not listed here (including
+     * inherited members such as `getClass`) is rejected by the sandbox.
+     */
+    private static final String[] ALLOWED_NAMESPACE_METHODS = new String[]{
+            "isChecked",
+            "numberValue",
+            "val",
+            "ditto",
+            "assessmentRating",
+            "hasInvolvement",
+            "isRetiring",
+            "belongsToOrgUnit",
+            "isAppKind",
+            "hasLifecyclePhase",
+            "hasDataType",
+            "dataTypeUsages"
+    };
+
+    private static final String[] ALLOWED_STRING_METHODS = new String[]{
+            "compareTo",
+            "compareToIgnoreCase",
+            "contains",
+            "endsWith",
+            "equals",
+            "equalsIgnoreCase",
+            "indexOf",
+            "isEmpty",
+            "length",
+            "matches",
+            "startsWith",
+            "substring",
+            "toLowerCase",
+            "toString",
+            "toUpperCase",
+            "trim"
+    };
+
+    private static final String[] ALLOWED_VALUE_METHODS = new String[]{
+            "booleanValue",
+            "compareTo",
+            "doubleValue",
+            "equals",
+            "intValue",
+            "longValue",
+            "toString"
+    };
+
+    private static final String[] ALLOWED_COLLECTION_METHODS = new String[]{
+            "contains",
+            "containsAll",
+            "isEmpty",
+            "size"
+    };
+
+    private static final String[] ALLOWED_MAP_METHODS = new String[]{
+            "containsKey",
+            "containsValue",
+            "get",
+            "isEmpty",
+            "size"
+    };
+
 
     public static List<SurveyQuestion> eval(DSLContext dsl,
                                      List<SurveyQuestion> qs,
@@ -40,10 +107,7 @@ public class QuestionPredicateEvaluator {
 
         QuestionBasePredicateNamespace namespace = mkPredicateNameSpace(dsl, qs, subjectRef, responsesByQuestionId);
 
-        JexlBuilder builder = new JexlBuilder();
-        JexlEngine jexl = builder
-                .namespaces(newHashMap(null, namespace))
-                .create();
+        JexlEngine jexl = mkEvaluationEngine(namespace);
 
         namespace.usingEvaluator(jexl);
 
@@ -53,6 +117,40 @@ public class QuestionPredicateEvaluator {
     }
 
 
+
+
+    /**
+     * Inclusion predicates are stored (and therefore modifiable via the survey template admin
+     * screens) so they are evaluated on an engine which blocks everything by default and only
+     * permits the namespace functions plus a handful of value/collection operations.
+     */
+    static JexlEngine mkEvaluationEngine(QuestionBasePredicateNamespace namespace) {
+        JexlSandbox sandbox = new JexlSandbox(false, true);
+
+        sandbox.allow(QuestionBasePredicateNamespace.class.getName())
+                .execute(ALLOWED_NAMESPACE_METHODS);
+        sandbox.allow(String.class.getName())
+                .execute(ALLOWED_STRING_METHODS);
+        sandbox.allow(Boolean.class.getName())
+                .execute(ALLOWED_VALUE_METHODS);
+        sandbox.allow(Character.class.getName())
+                .execute(ALLOWED_VALUE_METHODS);
+        sandbox.allow(Number.class.getName())
+                .execute(ALLOWED_VALUE_METHODS);
+        sandbox.allow(Collection.class.getName())
+                .execute(ALLOWED_COLLECTION_METHODS);
+        sandbox.allow(Set.class.getName())
+                .execute(ALLOWED_COLLECTION_METHODS);
+        sandbox.allow(List.class.getName())
+                .execute(ALLOWED_COLLECTION_METHODS);
+        sandbox.allow(Map.class.getName())
+                .execute(ALLOWED_MAP_METHODS);
+
+        return new JexlBuilder()
+                .sandbox(sandbox)
+                .namespaces(newHashMap(null, namespace))
+                .create();
+    }
 
 
     private static QuestionBasePredicateNamespace mkPredicateNameSpace(DSLContext dsl, List<SurveyQuestion> qs, EntityReference subjectRef, Map<Long, SurveyQuestionResponse> responsesByQuestionId) {
