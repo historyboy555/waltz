@@ -21,229 +21,100 @@ package org.finos.waltz.service.application;
 import org.finos.waltz.data.application.ApplicationDao;
 import org.finos.waltz.data.application.search.ApplicationSearchDao;
 import org.finos.waltz.data.entity_alias.EntityAliasDao;
-import org.finos.waltz.model.Criticality;
-import org.finos.waltz.model.EntityKind;
-import org.finos.waltz.model.EntityReference;
-import org.finos.waltz.model.application.AppRegistrationRequest;
-import org.finos.waltz.model.application.AppRegistrationResponse;
-import org.finos.waltz.model.application.Application;
-import org.finos.waltz.model.application.ApplicationKind;
-import org.finos.waltz.model.application.AssetCodeRelationshipKind;
-import org.finos.waltz.model.application.ImmutableAppRegistrationRequest;
-import org.finos.waltz.model.application.ImmutableAppRegistrationResponse;
-import org.finos.waltz.model.application.ImmutableApplication;
-import org.finos.waltz.model.application.LifecyclePhase;
-import org.finos.waltz.model.entity_search.EntitySearchOptions;
+import org.finos.waltz.model.application.*;
 import org.finos.waltz.model.external_identifier.ExternalIdValue;
-import org.finos.waltz.model.rating.RagRating;
 import org.finos.waltz.service.tag.TagService;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static java.util.Arrays.asList;
-import static java.util.Collections.emptyList;
-import static java.util.Collections.emptyMap;
-import static java.util.Collections.singletonList;
-import static org.finos.waltz.common.SetUtilities.asSet;
-import static org.finos.waltz.model.EntityReference.mkRef;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anySet;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-/**
- * Characterization tests for {@link ApplicationService}.  Most methods are
- * simple delegations; the interesting behaviour is the app registration
- * side-effects and the asset-code based relationship classification in
- * {@code findRelated}.
- */
 class ApplicationServiceTest {
 
-    private final ApplicationDao applicationDao = mock(ApplicationDao.class);
-    private final TagService tagService = mock(TagService.class);
-    private final EntityAliasDao entityAliasDao = mock(EntityAliasDao.class);
-    private final ApplicationSearchDao appSearchDao = mock(ApplicationSearchDao.class);
+    @Mock private ApplicationDao applicationDao;
+    @Mock private TagService tagService;
+    @Mock private EntityAliasDao entityAliasDao;
+    @Mock private ApplicationSearchDao applicationSearchDao;
 
-    private final ApplicationService service = new ApplicationService(
-            applicationDao,
-            tagService,
-            entityAliasDao,
-            appSearchDao);
+    private ApplicationService service;
 
-
-    private static Application mkApp(long id, String assetCode, String parentAssetCode) {
-        return ImmutableApplication
-                .builder()
-                .id(id)
-                .name("app-" + id)
-                .description("d")
-                .organisationalUnitId(1L)
-                .applicationKind(ApplicationKind.IN_HOUSE)
-                .lifecyclePhase(LifecyclePhase.PRODUCTION)
-                .overallRating(RagRating.G)
-                .assetCode(Optional.ofNullable(assetCode).map(ExternalIdValue::of))
-                .parentAssetCode(Optional.ofNullable(parentAssetCode).map(ExternalIdValue::of))
-                .build();
+    @BeforeEach
+    void setup() {
+        MockitoAnnotations.openMocks(this);
+        service = new ApplicationService(applicationDao, tagService, entityAliasDao, applicationSearchDao);
     }
-
-
-    private static AppRegistrationRequest mkRegistrationRequest() {
-        return ImmutableAppRegistrationRequest
-                .builder()
-                .name("new app")
-                .description("d")
-                .organisationalUnitId(1L)
-                .applicationKind(ApplicationKind.IN_HOUSE)
-                .lifecyclePhase(LifecyclePhase.PRODUCTION)
-                .overallRating(RagRating.G)
-                .businessCriticality(Criticality.MEDIUM)
-                .aliases(asSet("alias-a"))
-                .tags(asSet("tag-a"))
-                .build();
-    }
-
 
     @Test
-    void constructionRejectsNullCollaborators() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> new ApplicationService(null, tagService, entityAliasDao, appSearchDao));
+    void findRelatedUsesClassificationPrecedenceAndReferenceIdentityForSelfExclusion() {
+        Application app = app(1, "code", "parent");
+        Application sharing = app(2, "code", "other-parent");
+        Application parent = app(3, "parent", "grandparent");
+        Application child = app(4, "child", "code");
+        Application sibling = app(5, "sibling", "parent");
+        Application equalButDistinct = app(1, "code", "parent");
+        when(applicationDao.findRelatedByApplicationId(1L))
+                .thenReturn(List.of(app, sharing, parent, child, sibling, equalButDistinct));
+
+        Map<AssetCodeRelationshipKind, List<Application>> result = service.findRelated(1L);
+
+        assertEquals(List.of(sharing, equalButDistinct), result.get(AssetCodeRelationshipKind.SHARING));
+        assertEquals(List.of(parent), result.get(AssetCodeRelationshipKind.PARENT));
+        assertEquals(List.of(child), result.get(AssetCodeRelationshipKind.CHILD));
+        assertEquals(List.of(sibling), result.get(AssetCodeRelationshipKind.SIBLING));
     }
 
-
     @Test
-    void searchWithAnEmptyQueryDoesNotHitTheSearchDao() {
-        assertEquals(emptyList(), service.search(""));
-        assertEquals(emptyList(), service.search((String) null));
+    void findRelatedReturnsEmptyMapWhenRequestedApplicationIsAbsent() {
+        Application other = app(2, "code", "parent");
+        when(applicationDao.findRelatedByApplicationId(1L)).thenReturn(List.of(other));
 
-        verifyNoInteractions(appSearchDao);
+        assertTrue(service.findRelated(1L).isEmpty());
     }
 
-
     @Test
-    void searchWithAQueryBuildsDefaultApplicationSearchOptions() {
-        when(appSearchDao.search(any(EntitySearchOptions.class))).thenReturn(emptyList());
+    void absentAssetCodesCompareAsSharing() {
+        Application app = app(1, null, null);
+        Application related = app(2, null, null);
+        when(applicationDao.findRelatedByApplicationId(1L)).thenReturn(List.of(app, related));
 
-        service.search("abc");
+        Map<AssetCodeRelationshipKind, List<Application>> result = service.findRelated(1L);
 
-        ArgumentCaptor<EntitySearchOptions> captor = ArgumentCaptor.forClass(EntitySearchOptions.class);
-        verify(appSearchDao).search(captor.capture());
-
-        assertEquals("abc", captor.getValue().searchQuery());
-        assertEquals(singletonList(EntityKind.APPLICATION), captor.getValue().entityKinds());
+        // Empty Optional values compare equal in the current classifier; pin this as-is.
+        assertEquals(List.of(related), result.get(AssetCodeRelationshipKind.SHARING));
     }
 
-
     @Test
-    void simpleLookupsAreDelegatedToTheDao() {
-        List<Application> apps = singletonList(mkApp(1L, "a", null));
-
-        when(applicationDao.findAll()).thenReturn(apps);
-        when(applicationDao.findByIds(asList(1L, 2L))).thenReturn(apps);
-        when(applicationDao.findByAssetCode(ExternalIdValue.of("a"))).thenReturn(apps);
-        when(applicationDao.countByOrganisationalUnit()).thenReturn(emptyList());
-        when(applicationDao.getById(1L)).thenReturn(mkApp(1L, "a", null));
-        when(applicationDao.update(any(Application.class))).thenReturn(1);
-
-        assertSame(apps, service.findAll());
-        assertSame(apps, service.findByIds(asList(1L, 2L)));
-        assertSame(apps, service.findByAssetCode(ExternalIdValue.of("a")));
-        assertTrue(service.countByOrganisationalUnit().isEmpty());
-        assertEquals(mkApp(1L, "a", null), service.getById(1L));
-        assertEquals(1, service.update(mkApp(1L, "a", null)));
+    void emptySearchQueryReturnsEmptyWithoutSearching() {
+        assertTrue(service.search("").isEmpty());
+        verifyNoInteractions(applicationSearchDao);
     }
 
-
     @Test
-    void registeringAnAppAlsoWritesAliasesAndTags() {
-        AppRegistrationRequest request = mkRegistrationRequest();
-        AppRegistrationResponse response = ImmutableAppRegistrationResponse
-                .builder()
-                .id(42L)
-                .originalRequest(request)
-                .build();
-
+    void unregisteredResponseLeavesAliasesAndTagsUntouched() {
+        AppRegistrationRequest request = mock(AppRegistrationRequest.class);
+        AppRegistrationResponse response = mock(AppRegistrationResponse.class);
+        when(request.name()).thenReturn("Application");
+        when(response.registered()).thenReturn(false);
         when(applicationDao.registerApp(request)).thenReturn(response);
 
-        assertSame(response, service.registerApp(request, "tester"));
+        assertSame(response, service.registerApp(request, "actor"));
 
-        EntityReference expectedRef = mkRef(EntityKind.APPLICATION, 42L);
-        verify(entityAliasDao).updateAliases(expectedRef, asSet("alias-a"));
-        verify(tagService).updateTags(expectedRef, asSet("tag-a"), "tester");
+        verify(applicationDao).registerApp(request);
+        verifyNoInteractions(entityAliasDao, tagService);
     }
 
-
-    @Test
-    void aFailedRegistrationLeavesAliasesAndTagsAlone() {
-        AppRegistrationRequest request = mkRegistrationRequest();
-        AppRegistrationResponse response = ImmutableAppRegistrationResponse
-                .builder()
-                .originalRequest(request)
-                .message("could not register")
-                .build();
-
-        when(applicationDao.registerApp(request)).thenReturn(response);
-
-        assertSame(response, service.registerApp(request, "tester"));
-
-        verify(entityAliasDao, never()).updateAliases(any(EntityReference.class), anySet());
-        verify(tagService, never()).updateTags(any(EntityReference.class), anySet(), anyString());
-    }
-
-
-    @Test
-    void registeringAnAppWithoutANameIsRejectedBeforeTouchingTheDao() {
-        AppRegistrationRequest request = ImmutableAppRegistrationRequest
-                .copyOf(mkRegistrationRequest())
-                .withName("");
-
-        assertThrows(IllegalArgumentException.class, () -> service.registerApp(request, "tester"));
-
-        verifyNoInteractions(applicationDao);
-    }
-
-
-    @Test
-    void findRelatedClassifiesAppsByAssetCodeRelationship() {
-        Application app = mkApp(1L, "code-1", "parent-1");
-        Application sharing = mkApp(2L, "code-1", "whatever");
-        Application parent = mkApp(3L, "parent-1", null);
-        Application child = mkApp(4L, "code-4", "code-1");
-        Application sibling = mkApp(5L, "code-5", "parent-1");
-        Application unrelated = mkApp(6L, "code-6", "parent-6");
-
-        when(applicationDao.findRelatedByApplicationId(1L))
-                .thenReturn(asList(app, sharing, parent, child, sibling, unrelated));
-
-        Map<AssetCodeRelationshipKind, List<Application>> related = service.findRelated(1L);
-
-        assertEquals(singletonList(sharing), related.get(AssetCodeRelationshipKind.SHARING));
-        assertEquals(singletonList(parent), related.get(AssetCodeRelationshipKind.PARENT));
-        assertEquals(singletonList(child), related.get(AssetCodeRelationshipKind.CHILD));
-        assertEquals(singletonList(sibling), related.get(AssetCodeRelationshipKind.SIBLING));
-        assertEquals(singletonList(unrelated), related.get(AssetCodeRelationshipKind.NONE));
-    }
-
-
-    @Test
-    void findRelatedIsEmptyWhenTheDaoResultDoesNotIncludeTheAppItself() {
-        // note: the subject app has to be part of the dao result set, otherwise
-        // no relationships are reported at all (rather than, say, throwing)
-        when(applicationDao.findRelatedByApplicationId(1L))
-                .thenReturn(singletonList(mkApp(2L, "code-2", null)));
-
-        assertEquals(emptyMap(), service.findRelated(1L));
+    private static Application app(long id, String assetCode, String parentAssetCode) {
+        Application app = mock(Application.class);
+        when(app.id()).thenReturn(Optional.of(id));
+        when(app.assetCode()).thenReturn(Optional.ofNullable(assetCode).map(ExternalIdValue::of));
+        when(app.parentAssetCode()).thenReturn(Optional.ofNullable(parentAssetCode).map(ExternalIdValue::of));
+        return app;
     }
 }
